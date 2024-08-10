@@ -70,20 +70,41 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
     }
 }
 
+// assume w has shape (n), x has shape (x, y, z, ..., n), result shape is (x, y, z, ..., n) 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+    assert!(w.shape().len() == 1);
+    assert!(x.shape().len() == 2); // TODO: FIX ME
+    assert_eq!(*x.shape().last().unwrap(), w.shape()[0]);
+    let _y = unsafe {
+        y.data_mut()
+    };
+    for i in 0..x.shape()[0]{
+        let mut ele_sqrt = 0.0;
+        let len = w.shape()[0];
+        for j in 0..x.shape()[x.shape().len()-1]{
+            ele_sqrt += x.data()[i * len + j] * x.data()[i * len + j];
+        }
+        ele_sqrt = (ele_sqrt/ len as f32).sqrt();
+        let lower = ele_sqrt + epsilon;
+        println!("ele_sqrt: {}, lower: {}", ele_sqrt, lower); 
+        for j in 0..x.shape()[x.shape().len()-1]{
+            _y[i * len + j] = x.data()[i * len + j] * w.data()[j] / lower;
+        } 
+    }
 }
 
 // y = sigmoid(x) * x * y
 // hint: this is an element-wise operation
 pub fn silu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
-    // let len = y.size();
-    // assert!(len == x.size());
+    let len = y.size();
+    assert!(len == x.size());
 
-    // let _y = unsafe { y.data_mut() };
-    // let _x = x.data();
-
-    todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
+    let _y = unsafe { y.data_mut() };
+    let _x = x.data();
+    for i in 0..len {
+        let x = _x[i];
+        _y[i] *= x / (1. + (-x).exp());
+    }
 }
 
 // C = beta * C + alpha * A @ B^T
