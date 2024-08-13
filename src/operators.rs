@@ -93,7 +93,11 @@ pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: 
     }
 }
 
-// y = sigmoid(x) * x * y
+// # Brief
+// * Sigmoid Linear Unit (SiLU) activation function, calculate y = y * x / (1 + exp(-x))
+// # Arg
+// * y: output tensor (in-place)
+// * x: input tensor
 // hint: this is an element-wise operation
 pub fn silu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
     let len = y.size();
@@ -107,10 +111,58 @@ pub fn silu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
     }
 }
 
-// C = beta * C + alpha * A @ B^T
-// hint: You don't need to do an explicit transpose of B
+// # Brief
+// * Matrix multiplication with transposed B, calculate C = beta * C + alpha * A @ B^T
+// # Arg
+// * c: output tensor (in-place)
+// * beta: scaling factor for c
+// * a: input tensor
+// * b: input weight tensor
+// * alpha: scaling factor for a @ b^T
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    assert!(c.shape().len() == 2); // TODO: only support two-dimensional matrix
+    assert!(a.shape().len() == 2);
+    assert!(b.shape().len() == 2);
+    let y_num = c.shape()[1];
+    let x_num = c.shape()[0];
+    let k_num = a.shape()[1];
+    let _c = unsafe { c.data_mut() };
+    for x in 0..x_num{
+        let row = &a.data()[x*k_num..(x+1)*k_num];
+        for y in 0..y_num{
+            let col = &b.data()[y*k_num..(y+1)*k_num];
+            let sum = row.iter().zip(col.iter()).map(|(a,b)|a*b).sum::<f32>();
+            _c[x*y_num + y] = beta * _c[x*y_num + y] + alpha * sum;
+        }
+    }
+    
+}
+
+// # Brief
+// * Element-wise addition of two matrices, calculate A = A + B
+// Arg
+// * A: output tensor (in-place)
+// * B: input tensor
+pub fn mat_add(A: &mut Tensor<f32>, B: &Tensor<f32>) {
+    assert_eq!(A.shape(), B.shape());
+    assert!(A.shape().len() <= 2, "only support 1D or 2D matrix");
+    let shape = A.shape().clone();
+    let shape_dim = A.shape().len();
+    let a_data = unsafe {
+        A.data_mut()
+    };
+    if shape_dim == 1 {
+        for i in 0..shape[0] {
+            a_data[i] += B.data()[i];
+        }
+    }
+    if shape_dim == 2{
+        for i in 0..shape[0]{
+            for j in 0..shape[1]{
+                a_data[i * shape[1] + j] += B.data()[i * shape[1] + j];
+            }
+        }
+    }
 }
 
 // Dot product of two tensors (treated as vectors)
