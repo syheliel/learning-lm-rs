@@ -74,7 +74,13 @@ impl Llama<f32> {
         // Embedding lookup
         OP::gather(&mut residual, input, &self.params.embedding_table);
 
+        // compute graph see: https://blog.csdn.net/weixin_43508499/article/details/132554559
         for layer in 0..self.n_layers {
+            // # prepare args
+            // 1. x = rms_norm(residual)
+            // 2. Q = RoPE(x @ Q_weight.T)
+            // 3. K = RoPE(x @ K_weight.T)
+            // 4. V = x @ V_weight.T
             OP::rms_norm(
                 &mut hidden_states,
                 &residual,
@@ -99,13 +105,48 @@ impl Llama<f32> {
                 self.rope_theta,
             );
 
+            // # add KV-cache
+            // 5. K = cat(K_cache, K)
+            // 6. V = cat(V_cache, V)
             let full_k = &mut cache.k_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
             let full_v = &mut cache.v_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
-
-            todo!("self_attention(...)");
-            todo!("down_proj matmul and add residual");
-
-            todo!("mlp(...)");
+            let k = &OP::alloc_concat(&full_k, k, 0);
+            let v = &OP::alloc_concat(&full_v, v, 0);
+            // # self attention
+            self_attention(
+                &mut hidden_states,
+                &mut att_scores,
+                q,
+                k,
+                v,
+                self.n_kv_h,
+                n_groups,
+                seq_len,
+                total_seq_len,
+                self.dqkv,
+            );
+            // create a new buffer TODO: can be improved
+            let mut new_att_scores: Tensor<f32> = Tensor::default(att_scores.shape());
+            OP::matmul_transb(
+                &mut new_att_scores,
+                0.0,
+                &att_scores,
+                &self.params.wo[layer],
+                1.0,
+            );
+            // add back to residual
+            OP::mat_add(&mut residual, &new_att_scores);
+            mlp(
+                &mut residual,
+                &mut hidden_states,
+                &mut gate_buf,
+                &mut up_buf,
+                &self.params.w_up[layer],
+                &self.params.w_down[layer],
+                &self.params.w_gate[layer],
+                &self.params.rms_ffn_w[layer],
+                self.eps,
+            );
         }
 
         // No matter what seq_len, the output is always a 1D vector of length vocab,
@@ -133,14 +174,26 @@ impl Llama<f32> {
         top_p: f32,
         top_k: u32,
         temperature: f32,
-    ) -> Vec<u32>{
+    ) -> Vec<u32> {
         let mut result = Vec::<u32>::new();
-        
+
         todo!("实现文本生成");
-        
+
         result
     }
 }
+
+// # Brief
+// * Self-attention layer
+// # Args
+// * hidden_states: the input tensor
+// * att_scores: the attention scores
+// * q,k,v: the query, key, and value tensors after RoPE
+// * n_kv_h: number of heads for key and value
+// * n_groups: number of groups for query
+// * seq_len: sequence length
+// * total_seq_len: total sequence length
+// * dqkv: length of a single q, k, or v vector
 
 fn self_attention(
     hidden_states: &mut Tensor<f32>, // (seq, n_kv_h * n_groups * dqkv)
@@ -154,7 +207,15 @@ fn self_attention(
     total_seq_len: usize,
     dqkv: usize,
 ) {
-    todo!("Implement self_attention");
+
+    // # get attention score
+    // score = Q @ K.T / sqrt(dim)
+    // attn = softmax(score)
+    OP::matmul_transb(att_scores, 0., q, k, 1.);
+    OP::masked_softmax(att_scores);
+    // x = attn @ V
+    // x = x @ O_weight.T
+    OP::matmul_transb(hidden_states, 0., &att_scores, v, 1.0);
 }
 
 fn mlp(
@@ -169,7 +230,7 @@ fn mlp(
     eps: f32,
 ) {
     OP::rms_norm(hidden_states, residual, rms_w, eps);
-    OP::matmul_transb(gate,0. , hidden_states, w_gate, 1.);
+    OP::matmul_transb(gate, 0., hidden_states, w_gate, 1.);
     OP::matmul_transb(up, 0., hidden_states, w_up, 1.);
     OP::silu(up, gate);
     OP::matmul_transb(hidden_states, 0., up, w_down, 1.);
@@ -185,7 +246,7 @@ pub fn test_mlp() {
     let mut hidden_states = Tensor::<f32>::default(&vec![seq_len, d]);
     let mut gate_buf = Tensor::<f32>::default(&vec![seq_len, di]);
     let mut up_buf = Tensor::<f32>::default(&vec![seq_len, di]);
-    let w_up = Tensor::<f32>::new(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6], &vec![di, d]);
+    let w_up: Tensor<f32> = Tensor::<f32>::new(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6], &vec![di, d]);
     let w_down = Tensor::<f32>::new(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6], &vec![d, di]);
     let w_gate = Tensor::<f32>::new(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6], &vec![di, d]);
     let rms_w = Tensor::<f32>::new(vec![1., 1.], &vec![d]);
@@ -216,8 +277,8 @@ pub fn test_mlp() {
 
 #[test]
 pub fn test_load_safetensors() {
-    use std::path::PathBuf;
     use crate::tensor::float_eq;
+    use std::path::PathBuf;
     let project_dir = env!("CARGO_MANIFEST_DIR");
     let model_dir = PathBuf::from(project_dir).join("models").join("story");
     let model = Llama::from_safetensors(model_dir);
@@ -229,17 +290,55 @@ pub fn test_load_safetensors() {
     assert_eq!(model.dqkv, 16);
     assert_eq!(model.di, 384);
 
-    assert!(float_eq(&model.params.embedding_table.data()[50], &0.14453125, 1e-6));
-    assert_eq!(model.params.lm_head.data()[10], model.params.embedding_table.data()[10]);
-    assert!(float_eq(&model.params.rms_att_w[0].data()[10], &0.18652344, 1e-6));
-    assert!(float_eq(&model.params.rms_ffn_w[1].data()[10], &0.32421875, 1e-6));
-    assert!(float_eq(&model.params.rms_out_w.data()[100], &0.73046875, 1e-6));
-    assert!(float_eq(&model.params.w_down[0].data()[100], &-0.0625, 1e-6));
+    assert!(float_eq(
+        &model.params.embedding_table.data()[50],
+        &0.14453125,
+        1e-6
+    ));
+    assert_eq!(
+        model.params.lm_head.data()[10],
+        model.params.embedding_table.data()[10]
+    );
+    assert!(float_eq(
+        &model.params.rms_att_w[0].data()[10],
+        &0.18652344,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.rms_ffn_w[1].data()[10],
+        &0.32421875,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.rms_out_w.data()[100],
+        &0.73046875,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.w_down[0].data()[100],
+        &-0.0625,
+        1e-6
+    ));
     assert!(float_eq(&model.params.w_up[0].data()[100], &1.46875, 1e-6));
-    assert!(float_eq(&model.params.w_gate[1].data()[100], &0.296875, 1e-6));
-    assert!(float_eq(&model.params.wq[1].data()[100], &0.032226563, 1e-6));
-    assert!(float_eq(&model.params.wk[1].data()[100], &-0.21386719, 1e-6));
-    assert!(float_eq(&model.params.wv[0].data()[100], &0.041015625, 1e-6));
+    assert!(float_eq(
+        &model.params.w_gate[1].data()[100],
+        &0.296875,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.wq[1].data()[100],
+        &0.032226563,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.wk[1].data()[100],
+        &-0.21386719,
+        1e-6
+    ));
+    assert!(float_eq(
+        &model.params.wv[0].data()[100],
+        &0.041015625,
+        1e-6
+    ));
     assert!(float_eq(&model.params.wo[0].data()[100], &0.01965332, 1e-6));
-
 }

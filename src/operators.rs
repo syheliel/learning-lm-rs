@@ -70,26 +70,32 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
     }
 }
 
-// assume w has shape (n), x has shape (x, y, z, ..., n), result shape is (x, y, z, ..., n) 
+// # Brief
+// * Root Mean Square normalization, calculate y = x * w / sqrt(sum(x^2) / len(x) + epsilon)
+// # Arg
+// * y: 2D output tensor (in-place)
+// * x: 2D input tensor
+// * w: 1D weight tensor
+// * epsilon: small value to avoid division by zero
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    assert!(w.shape().len() == 1);
-    assert!(x.shape().len() == 2); // TODO: FIX ME
-    assert_eq!(*x.shape().last().unwrap(), w.shape()[0]);
-    let _y = unsafe {
-        y.data_mut()
-    };
-    for i in 0..x.shape()[0]{
+    let w_dim = w.shape().len();
+    let x_dim = x.shape().len();
+    assert!(w_dim == 1);
+    assert!(x_dim == 2); // TODO: FIX ME
+    assert_eq!(x.shape()[x_dim - 1], w.shape()[0]);
+    let _y = unsafe { y.data_mut() };
+    for i in 0..x.shape()[0] {
         let mut ele_sqrt = 0.0;
         let len = w.shape()[0];
-        for j in 0..x.shape()[x.shape().len()-1]{
+        for j in 0..x.shape()[x.shape().len() - 1] {
             ele_sqrt += x.data()[i * len + j] * x.data()[i * len + j];
         }
-        ele_sqrt = (ele_sqrt/ len as f32).sqrt();
+        ele_sqrt = (ele_sqrt / len as f32).sqrt();
         let lower = ele_sqrt + epsilon;
-        println!("ele_sqrt: {}, lower: {}", ele_sqrt, lower); 
-        for j in 0..x.shape()[x.shape().len()-1]{
+        println!("ele_sqrt: {}, lower: {}", ele_sqrt, lower);
+        for j in 0..x.shape()[x.shape().len() - 1] {
             _y[i * len + j] = x.data()[i * len + j] * w.data()[j] / lower;
-        } 
+        }
     }
 }
 
@@ -127,15 +133,14 @@ pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor
     let x_num = c.shape()[0];
     let k_num = a.shape()[1];
     let _c = unsafe { c.data_mut() };
-    for x in 0..x_num{
-        let row = &a.data()[x*k_num..(x+1)*k_num];
-        for y in 0..y_num{
-            let col = &b.data()[y*k_num..(y+1)*k_num];
-            let sum = row.iter().zip(col.iter()).map(|(a,b)|a*b).sum::<f32>();
-            _c[x*y_num + y] = beta * _c[x*y_num + y] + alpha * sum;
+    for x in 0..x_num {
+        let row = &a.data()[x * k_num..(x + 1) * k_num];
+        for y in 0..y_num {
+            let col = &b.data()[y * k_num..(y + 1) * k_num];
+            let sum = row.iter().zip(col.iter()).map(|(a, b)| a * b).sum::<f32>();
+            _c[x * y_num + y] = beta * _c[x * y_num + y] + alpha * sum;
         }
     }
-    
 }
 
 // # Brief
@@ -148,21 +153,61 @@ pub fn mat_add(A: &mut Tensor<f32>, B: &Tensor<f32>) {
     assert!(A.shape().len() <= 2, "only support 1D or 2D matrix");
     let shape = A.shape().clone();
     let shape_dim = A.shape().len();
-    let a_data = unsafe {
-        A.data_mut()
-    };
+    let a_data = unsafe { A.data_mut() };
     if shape_dim == 1 {
         for i in 0..shape[0] {
             a_data[i] += B.data()[i];
         }
     }
-    if shape_dim == 2{
-        for i in 0..shape[0]{
-            for j in 0..shape[1]{
+    if shape_dim == 2 {
+        for i in 0..shape[0] {
+            for j in 0..shape[1] {
                 a_data[i * shape[1] + j] += B.data()[i * shape[1] + j];
             }
         }
     }
+}
+
+// # Brief
+// * alloc a new tensor, concat two tensors along a given axis
+// All data will be deep copied
+// Arg
+// * A: output tensor (in-place)
+// * B: input tensor
+pub fn alloc_concat(A: &Tensor<f32>, B: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+    assert!(A.shape().len() == B.shape().len());
+    // check whther concat is avaliable in current axis
+    for i in 0..A.shape().len() {
+        if i != axis {
+            assert!(A.shape()[i] == B.shape()[i]);
+        };
+    }
+    let mut new_shape = A.shape().clone();
+    new_shape[axis] += B.shape()[axis];
+    // suppose A.shape() == [2, 3, 4], B.shape() == [2, 1, 4]
+    // memory view will be:
+    // [A[0,:,:],B[0,:,:]]
+    // [A[1,:,:],B[1,:,:]]
+    // So we need to split A and B into 2 chunks and concat them
+    let A_chunk_size: usize = (&A.shape()[axis..]).iter().product();
+    let B_chunk_size: usize = (&B.shape()[axis..]).iter().product();
+    println!(
+        "A_chunk_size: {}, B_chunk_size: {}",
+        A_chunk_size, B_chunk_size
+    );
+    let A_data_chunk = A.data().chunks(A_chunk_size);
+    let B_data_chunk = B.data().chunks(B_chunk_size);
+    assert!(A_data_chunk.len() == B_data_chunk.len());
+    let new_data = A_data_chunk
+        .zip(B_data_chunk)
+        .flat_map(|(chunk1, chunk2)| {
+            let mut result = Vec::new();
+            result.extend_from_slice(chunk1);
+            result.extend_from_slice(chunk2);
+            result
+        })
+        .collect();
+    Tensor::new(new_data, &new_shape)
 }
 
 // Dot product of two tensors (treated as vectors)
@@ -279,6 +324,28 @@ fn test_matmul_transb() {
     matmul_transb(&mut c, 1., &a, &b, 1.);
     assert!(c.close_to(
         &Tensor::<f32>::new(vec![15., 34., 35., 81.], &vec![2, 2]),
+        1e-3
+    ));
+}
+
+#[test]
+fn test_alloc_concat() {
+    let a = Tensor::<f32>::new(vec![1., 2., 3., 4., 5., 6.], &vec![2, 3]);
+    let b = Tensor::<f32>::new(vec![1., 2., 3., 4., 5., 6.], &vec![2, 3]);
+    let mut c = alloc_concat(&a, &b, 1);
+    assert!(c.close_to(
+        &Tensor::<f32>::new(
+            vec![1., 2., 3., 1., 2., 3., 4., 5., 6., 4., 5., 6.],
+            &vec![2, 6]
+        ),
+        1e-3
+    ));
+    let c = alloc_concat(&a, &b, 0);
+    assert!(c.close_to(
+        &Tensor::<f32>::new(
+            vec![1., 2., 3., 4., 5., 6.,1.,2.,3., 4., 5., 6.],
+            &vec![4, 3]
+        ),
         1e-3
     ));
 }
